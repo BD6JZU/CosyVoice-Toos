@@ -4,11 +4,13 @@ import time
 import json
 import threading
 import dashscope
-from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
+from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer, AudioFormat
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QFormLayout, QLineEdit, QPushButton, QLabel, QFileDialog, 
                             QMessageBox, QGroupBox, QTableWidget, QTableWidgetItem, 
-                            QHeaderView, QProgressBar, QComboBox, QTextEdit, QAbstractItemView)
+                            QHeaderView, QProgressBar, QComboBox, QTextEdit, QAbstractItemView,
+                            QSpinBox, QDoubleSpinBox, QSlider)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 
@@ -29,7 +31,7 @@ QPushButton#DeleteBtn:hover { background-color: #b92534; }
 QPushButton#RefreshBtn { background-color: #2ea44f; }
 QTableWidget { border: 1px solid #e1e4e8; selection-background-color: #f1f8ff; selection-color: #24292e; }
 QTextEdit { background-color: #24292e; color: #e1e4e8; border-radius: 6px; font-family: Consolas; font-size: 12px; }
-QProgressBar { border: none; background-color: #e1e4e8; height: 6px; border-radius: 3px; }
+QProgressBar { border: 1px solid #e1e4e8; background-color: #ffffff; text-align: center; border-radius: 3px; color: black; }
 QProgressBar::chunk { background-color: #2ea44f; border-radius: 3px; }
 """
 
@@ -105,54 +107,66 @@ class VoiceQueryThread(QThread):
             self.finished.emit([])
 
 # ===========================
-# 2. 语音合成线程 (修正版：移除导致类型错误的 format 参数)
+# 2. 语音合成线程 (已修改：增加音量和语速支持)
 # ===========================
 class SpeechSynthesisThread(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
     
-    def __init__(self, api_key, text, output_path, voice_id, model):
+    # 修改1：__init__ 增加 volume 和 speech_rate 参数
+    def __init__(self, api_key, text, output_path, voice_id, model, volume, speech_rate):
         super().__init__()
         self.api_key = api_key
         self.text = text
         self.output_path = output_path
         self.voice_id = voice_id
         self.model = model
+        self.volume = volume           # 新增：保存音量
+        self.speech_rate = speech_rate # 新增：保存语速
 
     def run(self):
         try:
+            # 1. 设置 API Key
             dashscope.api_key = self.api_key
-            self.progress.emit(10, f"初始化: {self.model}")
+            self.progress.emit(10, f"初始化模型: {self.model}")
             
-            # --- 修正：仅传递 model 和 voice，移除 format ---
-            # 移除 format='mp3' 以规避 'str' object has no attribute 'sample_rate' 错误
-            # SDK 会默认返回音频流（通常是 mp3 或 wav）
+            # 2. 实例化 Synthesizer
+            # 参考文档：必须使用 AudioFormat 枚举来指定格式，而不是字符串
+            # 22050Hz 是 CosyVoice 的标准采样率，256KBPS 保证 MP3 音质
             synthesizer = SpeechSynthesizer(
                 model=self.model,
-                voice=self.voice_id
+                voice=self.voice_id,
+                format=AudioFormat.MP3_22050HZ_MONO_256KBPS,
+                # 修改2：将音量和语速传递给 SDK
+                volume=self.volume,          # 范围 0-100
+                speech_rate=self.speech_rate # 范围 0.5-2.0
             )
             
-            self.progress.emit(50, "正在生成音频...")
+            self.progress.emit(40, "正在向阿里云发送请求...")
             
-            # 调用 call
-            result = synthesizer.call(self.text)
+            # 3. 调用 call 方法 (非流式调用)
+            # 文档说明：call 方法直接返回二进制音频数据 (bytes)
+            audio = synthesizer.call(self.text)
             
-            # 检查返回结果类型
-            if isinstance(result, bytes):
-                 with open(self.output_path, 'wb') as f:
-                     f.write(result)
-                 self.progress.emit(100, "✅ 合成成功")
-                 self.finished.emit(True, self.output_path)
-            elif hasattr(result, 'output') and hasattr(result.output, 'choices'):
-                 # 处理可能的复杂对象返回 (虽然通常是bytes)
-                 self.finished.emit(False, f"API 返回了对象而非音频流: {result}")
+            self.progress.emit(80, "接收数据中...")
+
+            # 4. 验证并保存结果
+            if isinstance(audio, bytes):
+                # 写入文件
+                with open(self.output_path, 'wb') as f:
+                    f.write(audio)
+                self.progress.emit(100, "✅ 合成成功")
+                self.finished.emit(True, self.output_path)
             else:
-                 # 如果是字符串或错误信息
-                 self.finished.emit(False, f"合成失败: {str(result)}")
+                # 理论上 SDK v2 的 call 方法只返回 bytes，除非出错抛异常
+                # 这里做一个兜底处理
+                self.finished.emit(False, f"API 返回了非音频数据: {type(audio)}")
 
         except Exception as e:
-            # 捕获并显示详细错误
-            self.finished.emit(False, f"执行异常: {str(e)}")
+            # 捕获 SDK 抛出的所有错误（如 API Key 错误、网络超时等）
+            error_msg = str(e)
+            self.progress.emit(0, "❌ 发生错误")
+            self.finished.emit(False, f"合成失败: {error_msg}")
 
 # ===========================
 # 3. 音色复刻线程
@@ -268,6 +282,7 @@ class VoiceEnrollmentApp(QMainWindow):
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["音色ID", "状态", "模型 (猜测)"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 禁止双击编辑
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
@@ -294,30 +309,86 @@ class VoiceEnrollmentApp(QMainWindow):
         v3.addLayout(btns)
         group3.setLayout(v3)
         
-        # 4. 合成操作
+        # 4. 语音合成
         group4 = QGroupBox("4. 语音合成")
         v4 = QVBoxLayout()
+        
         self.lbl_info = QLabel("当前状态: 未选择音色")
-        self.lbl_info.setStyleSheet("color: #666;")
+        self.lbl_info.setStyleSheet("color: #666; font-weight: bold;")
+        v4.addWidget(self.lbl_info)
+        
+        # --- A. 音量调节 (0-100) ---
+        h_vol = QHBoxLayout()
+        h_vol.addWidget(QLabel("音量:"))
+        
+        # 1. 音量滑块
+        self.slider_vol = QSlider(Qt.Horizontal)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(50)
+        
+        # 2. 音量数字框
+        self.spin_vol = QSpinBox()
+        self.spin_vol.setRange(0, 100)
+        self.spin_vol.setValue(50)
+        self.spin_vol.setFixedWidth(60)
+        
+        # 3. 双向绑定信号
+        # 滑块动 -> 数字变
+        self.slider_vol.valueChanged.connect(self.spin_vol.setValue)
+        # 数字变 -> 滑块动
+        self.spin_vol.valueChanged.connect(self.slider_vol.setValue)
+        
+        h_vol.addWidget(self.slider_vol)
+        h_vol.addWidget(self.spin_vol)
+        v4.addLayout(h_vol)
+        
+        # --- B. 语速调节 (0.5 - 2.0) ---
+        # 技巧: QSlider只支持整数，我们将范围设为 5-20 (代表 0.5-2.0)
+        h_speed = QHBoxLayout()
+        h_speed.addWidget(QLabel("语速:"))
+        
+        # 1. 语速滑块 (5 - 20)
+        self.slider_speed = QSlider(Qt.Horizontal)
+        self.slider_speed.setRange(5, 20) 
+        self.slider_speed.setValue(10) # 默认 1.0
+        
+        # 2. 语速数字框 (0.5 - 2.0)
+        self.spin_speed = QDoubleSpinBox()
+        self.spin_speed.setRange(0.5, 2.0)
+        self.spin_speed.setSingleStep(0.1)
+        self.spin_speed.setValue(1.0)
+        self.spin_speed.setFixedWidth(60)
+        
+        # 3. 双向绑定信号 (需要数值转换)
+        # 滑块(int) -> 除以10 -> 数字框(float)
+        self.slider_speed.valueChanged.connect(lambda v: self.spin_speed.setValue(v / 10.0))
+        # 数字框(float) -> 乘以10 -> 滑块(int)
+        self.spin_speed.valueChanged.connect(lambda v: self.slider_speed.setValue(int(v * 10)))
+        
+        h_speed.addWidget(self.slider_speed)
+        h_speed.addWidget(self.spin_speed)
+        v4.addLayout(h_speed)
+        
+        # --- C. 文本与路径输入 (保持不变) ---
         self.txt_input = QLineEdit()
         self.txt_input.setPlaceholderText("请输入要合成的文本...")
+        v4.addWidget(self.txt_input)
         
-        h4 = QHBoxLayout()
+        h_path = QHBoxLayout()
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("保存路径...")
         btn_path = QPushButton("选择路径")
         btn_path.clicked.connect(self.action_path)
-        h4.addWidget(self.path_input)
-        h4.addWidget(btn_path)
+        h_path.addWidget(self.path_input)
+        h_path.addWidget(btn_path)
+        v4.addLayout(h_path)
         
         self.btn_gen = QPushButton("开始合成音频")
         self.btn_gen.setCursor(Qt.PointingHandCursor)
+        self.btn_gen.setStyleSheet("QPushButton { font-weight: bold; padding: 5px; }")
         self.btn_gen.clicked.connect(self.action_gen)
-        
-        v4.addWidget(self.lbl_info)
-        v4.addWidget(self.txt_input)
-        v4.addLayout(h4)
         v4.addWidget(self.btn_gen)
+        
         group4.setLayout(v4)
         
         left.addWidget(group1)
@@ -470,6 +541,11 @@ class VoiceEnrollmentApp(QMainWindow):
         txt = self.txt_input.text().strip()
         out = self.path_input.text().strip()
         
+        # --- 获取界面上的音量和语速参数 ---
+        vol = self.spin_vol.value()
+        speed = self.spin_speed.value()
+        # -----------------------
+        
         if not key:
             QMessageBox.warning(self, "提示", "缺少 API Key")
             return
@@ -484,7 +560,8 @@ class VoiceEnrollmentApp(QMainWindow):
             return
 
         self.btn_gen.setEnabled(False)
-        self.worker_gen = SpeechSynthesisThread(key, txt, out, self.current_voice_id, self.current_model)
+        # 这里传入 vol 和 speed
+        self.worker_gen = SpeechSynthesisThread(key, txt, out, self.current_voice_id, self.current_model, vol, speed)
         self.worker_gen.progress.connect(lambda v, m: [self.pbar.setValue(v), self.log(m)])
         self.worker_gen.finished.connect(self.on_gen_finished)
         self.worker_gen.start()
