@@ -3,6 +3,9 @@
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
 ![Model](https://img.shields.io/badge/Model-CosyVoice%20v3--plus-orange)
+![Model](https://img.shields.io/badge/Model-CosyVoice%20v3--flash-orange)
+![Model](https://img.shields.io/badge/Model-CosyVoice%20v2-orange)
+![Model](https://img.shields.io/badge/Model-CosyVoice%20v1-orange)
 
 ## 📖 项目简介
 
@@ -123,4 +126,3 @@ if hasattr(Qt, 'AA_EnableHighDpiScaling'):
 MIT License
 
 ---
-
