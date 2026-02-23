@@ -49,16 +49,15 @@ class VoiceQueryThread(QThread):
     def run(self):
         try:
             dashscope.api_key = self.api_key
-            service = VoiceEnrollmentService()
+            service = VoiceEnrollmentService(api_key=self.api_key)
             
             all_voices = []
-            page_index = 0
+            page_index = 0  # 改回0（你的SDK分页从0开始）
             page_size = 50 
             
-            self.log_signal.emit(f"正在拉取列表 (Page 0)...")
+            self.log_signal.emit(f"正在拉取列表 (Page {page_index})...")
             
             while True:
-                # 调用 SDK
                 try:
                     resp = service.list_voices(page_index=page_index, page_size=page_size)
                 except Exception as e:
@@ -66,29 +65,25 @@ class VoiceQueryThread(QThread):
                     break
 
                 current_page_voices = []
-
-                # --- 解析逻辑 A: SDK直接返回列表 (List[dict]) ---
+                # ========== 核心修复：优先处理列表格式 ==========
+                # 情况1：resp直接是列表（你的SDK返回格式）
                 if isinstance(resp, list):
                     current_page_voices = resp
-                
-                # --- 解析逻辑 B: SDK返回对象 (DashScopeResponse) ---
+                # 情况2：resp是DashScopeResponse对象（官方标准格式）
                 elif hasattr(resp, 'output'):
                     output = resp.output
                     if isinstance(output, dict):
                         current_page_voices = output.get('voice_list', [])
                     elif hasattr(output, 'voice_list'):
                         current_page_voices = output.voice_list
-                
-                # --- 解析逻辑 C: SDK返回字典 (Dict) ---
+                # 情况3：resp是字典（兼容其他格式）
                 elif isinstance(resp, dict):
-                    if 'output' in resp:
-                         if isinstance(resp['output'], dict):
-                             current_page_voices = resp['output'].get('voice_list', [])
-                    elif 'voice_list' in resp:
-                        current_page_voices = resp['voice_list']
+                    current_page_voices = resp.get('voice_list', [])
 
+                self.log_signal.emit(f"Page {page_index} 获取到 {len(current_page_voices)} 条音色数据")
+                
                 if not current_page_voices:
-                    if page_index == 0:
+                    if page_index == 0:  # 匹配你的分页起始值
                         self.log_signal.emit("提示: 第 0 页返回为空，账号下可能没有音色。")
                     break
                 
@@ -98,7 +93,7 @@ class VoiceQueryThread(QThread):
                     break
                 
                 page_index += 1
-                time.sleep(0.1) 
+                time.sleep(0.1)
 
             self.finished.emit(all_voices)
             
@@ -107,13 +102,12 @@ class VoiceQueryThread(QThread):
             self.finished.emit([])
 
 # ===========================
-# 2. 语音合成线程 (已修改：增加音量和语速支持)
+# 2. 语音合成线程
 # ===========================
 class SpeechSynthesisThread(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
     
-    # 修改1：__init__ 增加 volume 和 speech_rate 参数
     def __init__(self, api_key, text, output_path, voice_id, model, volume, speech_rate):
         super().__init__()
         self.api_key = api_key
@@ -121,52 +115,61 @@ class SpeechSynthesisThread(QThread):
         self.output_path = output_path
         self.voice_id = voice_id
         self.model = model
-        self.volume = volume           # 新增：保存音量
-        self.speech_rate = speech_rate # 新增：保存语速
+        self.volume = volume
+        self.speech_rate = speech_rate
 
+    # [重要] 缩进修复：run 方法必须在 class 内部
     def run(self):
         try:
             # 1. 设置 API Key
-            dashscope.api_key = self.api_key
+            dashscope.api_key = self.api_key 
             self.progress.emit(10, f"初始化模型: {self.model}")
             
             # 2. 实例化 Synthesizer
-            # 参考文档：必须使用 AudioFormat 枚举来指定格式，而不是字符串
-            # 22050Hz 是 CosyVoice 的标准采样率，256KBPS 保证 MP3 音质
             synthesizer = SpeechSynthesizer(
                 model=self.model,
                 voice=self.voice_id,
                 format=AudioFormat.MP3_22050HZ_MONO_256KBPS,
-                # 修改2：将音量和语速传递给 SDK
-                volume=self.volume,          # 范围 0-100
-                speech_rate=self.speech_rate # 范围 0.5-2.0
+                volume=self.volume,          
+                speech_rate=self.speech_rate
             )
             
             self.progress.emit(40, "正在向阿里云发送请求...")
             
-            # 3. 调用 call 方法 (非流式调用)
+            # 3. 调用 API
             # 文档说明：call 方法直接返回二进制音频数据 (bytes)
-            audio = synthesizer.call(self.text)
+            audio_data = synthesizer.call(self.text)
             
-            self.progress.emit(80, "接收数据中...")
+            self.progress.emit(80, "接收数据完成，正在保存...")
 
-            # 4. 验证并保存结果
-            if isinstance(audio, bytes):
+            # 4. 直接处理 bytes 数据
+            if isinstance(audio_data, bytes) and len(audio_data) > 0:
+                # 确保保存目录存在
+                output_dir = os.path.dirname(self.output_path)
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
                 # 写入文件
                 with open(self.output_path, 'wb') as f:
-                    f.write(audio)
+                    f.write(audio_data)
+                    
                 self.progress.emit(100, "✅ 合成成功")
                 self.finished.emit(True, self.output_path)
+            
+            # 处理可能的异常返回 (虽然通常会直接抛出异常)
+            elif hasattr(audio_data, 'output'): 
+                # 如果返回的是错误对象
+                msg = getattr(audio_data.output, 'message', '未知错误')
+                self.finished.emit(False, f"API 返回错误: {msg}")
             else:
-                # 理论上 SDK v2 的 call 方法只返回 bytes，除非出错抛异常
-                # 这里做一个兜底处理
-                self.finished.emit(False, f"API 返回了非音频数据: {type(audio)}")
+                # 其他情况
+                self.finished.emit(False, f"合成失败: 返回了非音频数据 ({type(audio_data)})")
 
         except Exception as e:
-            # 捕获 SDK 抛出的所有错误（如 API Key 错误、网络超时等）
+            # 捕获 SDK 抛出的所有错误（如 API Key 错误、欠费、网络超时等）
             error_msg = str(e)
             self.progress.emit(0, "❌ 发生错误")
-            self.finished.emit(False, f"合成失败: {error_msg}")
+            self.finished.emit(False, f"执行异常: {error_msg}")
 
 # ===========================
 # 3. 音色复刻线程
@@ -184,44 +187,88 @@ class VoiceEnrollmentThread(QThread):
 
     def run(self):
         try:
+            # 确保 API Key 生效
             dashscope.api_key = self.api_key
-            service = VoiceEnrollmentService()
+            service = VoiceEnrollmentService(api_key=self.api_key)
+            
             self.progress.emit(10, f"提交复刻任务 ({self.model})...")
             
             kwargs = {
-                'target_model': self.model,
+                'target_model': self.model, 
                 'prefix': self.voice_name,
                 'url': self.audio_url
             }
             if 'v3' in self.model:
                 kwargs['language_hints'] = ['zh']
                 
-            voice_id = service.create_voice(**kwargs)
+            # 提交任务
+            try:
+                voice_id = service.create_voice(**kwargs)
+            except Exception as e:
+                self.finished.emit(False, f"提交任务失败: {str(e)}")
+                return
+
             self.progress.emit(30, f"任务已提交，ID: {voice_id}")
             
-            for i in range(60): 
+            # 轮询状态
+            max_retry = 120 
+            retry_count = 0
+            
+            # [修改点] 完善状态映射表
+            status_map = {
+                "OK": "训练完成",
+                "SUCCEEDED": "训练完成",
+                "RUNNING": "训练中",
+                "DEPLOYING": "模型部署中",  # 加上这个
+                "FAILED": "训练失败",
+                "UNDEPLOYED": "音频质量不达标",
+                "UNKNOWN": "状态未知"
+            }
+            
+            while retry_count < max_retry: 
                 time.sleep(5)
+                retry_count += 1
                 try:
                     res = service.query_voice(voice_id=voice_id)
-                    status = "UNKNOWN"
-                    if isinstance(res, dict): status = res.get('status', 'UNKNOWN')
-                    elif hasattr(res, 'output'): status = res.output.get('status', 'UNKNOWN')
-                    elif hasattr(res, 'status'): status = res.status
                     
-                    if status == "OK":
+                    # === 解析状态 ===
+                    status = "UNKNOWN"
+                    output = getattr(res, 'output', None)
+                    if output:
+                        if isinstance(output, dict):
+                            status = output.get('status', 'UNKNOWN')
+                        else:
+                            status = getattr(output, 'status', 'UNKNOWN')
+                    
+                    if status == "UNKNOWN":
+                        if isinstance(res, dict):
+                            status = res.get('status', 'UNKNOWN')
+                        else:
+                            status = getattr(res, 'status', 'UNKNOWN')
+
+                    # === [核心修改] 日志显示优化 ===
+                    # 无论真实状态是 DEPLOYING 还是 RUNNING，都显示为 "RUNNING" 风格
+                    display_status = "RUNNING" if status == "DEPLOYING" else status
+                    status_desc = status_map.get(status, status)
+                    
+                    self.progress.emit(30 + int(retry_count/max_retry*40), 
+                                      f"训练中 [{display_status}] - {status_desc}...")
+                    
+                    # 判断是否成功
+                    if status == "OK" or status == "SUCCEEDED":
                         self.finished.emit(True, voice_id)
                         return
-                    elif status == "UNDEPLOYED":
-                        self.finished.emit(False, "复刻失败: 音频质量可能不合格")
+                    elif status in ["FAILED", "UNDEPLOYED"]:
+                        self.finished.emit(False, f"复刻失败: {status}")
                         return
                     
-                    self.progress.emit(30 + i, f"训练中 [{status}]...")
-                except:
-                    pass
+                except Exception as e:
+                    self.progress.emit(30 + retry_count, f"查询报错: {str(e)}，重试中...")
+                    continue
                 
-            self.finished.emit(False, "训练超时，请稍后刷新列表查看")
+            self.finished.emit(False, f"训练超时（{max_retry*5}秒），请稍后刷新列表查看")
         except Exception as e:
-            self.finished.emit(False, f"错误: {str(e)}")
+            self.finished.emit(False, f"系统错误: {str(e)}")
 
 # ===========================
 # 4. 主窗口
@@ -235,6 +282,7 @@ class VoiceEnrollmentApp(QMainWindow):
         
         self.current_voice_id = None
         self.current_model = None
+        self.thread_lock = threading.Lock()  # 新增：线程互斥锁
         
         self.init_ui()
         self.log("程序已就绪。")
@@ -248,16 +296,27 @@ class VoiceEnrollmentApp(QMainWindow):
         # --- 左侧面板 ---
         left = QVBoxLayout()
         
-        # 1. API 配置
+        # 1. API 配置（新增：显示/隐藏API Key按钮）
         group1 = QGroupBox("1. API 配置")
         f1 = QFormLayout()
         self.api_input = QLineEdit()
         self.api_input.setPlaceholderText("填写你的API Key")
         self.api_input.setEchoMode(QLineEdit.Password)
+        
+        # 新增：显示/隐藏按钮
+        self.show_api_btn = QPushButton("显示")
+        self.show_api_btn.setCheckable(True)
+        self.show_api_btn.clicked.connect(self.toggle_api_visibility)
+        
+        # 新增：水平布局放输入框和按钮
+        api_layout = QHBoxLayout()
+        api_layout.addWidget(self.api_input)
+        api_layout.addWidget(self.show_api_btn)
+        
         self.model_combo = QComboBox()
         self.model_combo.addItems(["cosyvoice-v3-plus", "cosyvoice-v3-flash", "cosyvoice-v2", "cosyvoice-v1"])
         self.model_combo.setCurrentText("cosyvoice-v3-plus")
-        f1.addRow("API Key:", self.api_input)
+        f1.addRow("API Key:", api_layout)  # 替换原有行
         f1.addRow("使用模型:", self.model_combo)
         group1.setLayout(f1)
         
@@ -410,6 +469,15 @@ class VoiceEnrollmentApp(QMainWindow):
         layout.addLayout(left, 6)
         layout.addLayout(right, 4)
 
+    # 新增：API Key显示/隐藏切换
+    def toggle_api_visibility(self):
+        if self.show_api_btn.isChecked():
+            self.api_input.setEchoMode(QLineEdit.Normal)
+            self.show_api_btn.setText("隐藏")
+        else:
+            self.api_input.setEchoMode(QLineEdit.Password)
+            self.show_api_btn.setText("显示")
+
     # --- 辅助方法 ---
     def log(self, m):
         t = time.strftime('%H:%M:%S')
@@ -424,14 +492,15 @@ class VoiceEnrollmentApp(QMainWindow):
             QMessageBox.warning(self, "提示", "请先填写 API Key")
             return
             
-        self.btn_refresh.setEnabled(False)
-        self.btn_refresh.setText("刷新中...")
-        self.table.setRowCount(0)
-        
-        self.worker = VoiceQueryThread(key)
-        self.worker.log_signal.connect(self.log)
-        self.worker.finished.connect(self.on_refresh_done)
-        self.worker.start()
+        with self.thread_lock:
+            self.btn_refresh.setEnabled(False)
+            self.btn_refresh.setText("刷新中...")
+            self.table.setRowCount(0)
+            
+            self.worker = VoiceQueryThread(key)
+            self.worker.log_signal.connect(self.log)
+            self.worker.finished.connect(self.on_refresh_done)
+            self.worker.start()
 
     def on_refresh_done(self, voices):
         self.btn_refresh.setEnabled(True)
@@ -477,11 +546,12 @@ class VoiceEnrollmentApp(QMainWindow):
             QMessageBox.warning(self, "参数缺失", "请填写音色名称 (prefix)")
             return
 
-        self.btn_enroll.setEnabled(False)
-        self.worker_enroll = VoiceEnrollmentThread(key, url, name, self.model_combo.currentText())
-        self.worker_enroll.progress.connect(lambda v, m: [self.pbar.setValue(v), self.log(m)])
-        self.worker_enroll.finished.connect(self.on_enroll_finished)
-        self.worker_enroll.start()
+        with self.thread_lock:
+            self.btn_enroll.setEnabled(False)
+            self.worker_enroll = VoiceEnrollmentThread(key, url, name, self.model_combo.currentText())
+            self.worker_enroll.progress.connect(lambda v, m: [self.pbar.setValue(v), self.log(m)])
+            self.worker_enroll.finished.connect(self.on_enroll_finished)
+            self.worker_enroll.start()
 
     def on_enroll_finished(self, success, msg):
         self.btn_enroll.setEnabled(True)
@@ -559,19 +629,23 @@ class VoiceEnrollmentApp(QMainWindow):
             QMessageBox.warning(self, "提示", "请选择保存路径")
             return
 
-        self.btn_gen.setEnabled(False)
-        # 这里传入 vol 和 speed
-        self.worker_gen = SpeechSynthesisThread(key, txt, out, self.current_voice_id, self.current_model, vol, speed)
-        self.worker_gen.progress.connect(lambda v, m: [self.pbar.setValue(v), self.log(m)])
-        self.worker_gen.finished.connect(self.on_gen_finished)
-        self.worker_gen.start()
+        with self.thread_lock:
+            self.btn_gen.setEnabled(False)
+            self.pbar.setValue(0)  # 重置进度条
+            # 这里传入 vol 和 speed
+            self.worker_gen = SpeechSynthesisThread(key, txt, out, self.current_voice_id, self.current_model, vol, speed)
+            self.worker_gen.progress.connect(lambda v, m: [self.pbar.setValue(v), self.log(m)])
+            self.worker_gen.finished.connect(self.on_gen_finished)
+            self.worker_gen.start()
 
     def on_gen_finished(self, success, msg):
-        self.btn_gen.setEnabled(True)
-        if success:
-            QMessageBox.information(self, "成功", f"文件已保存至:\n{msg}")
-        else:
-            QMessageBox.warning(self, "失败", msg)
+        with self.thread_lock:
+            self.btn_gen.setEnabled(True)
+            self.pbar.setValue(100 if success else 0)
+            if success:
+                QMessageBox.information(self, "成功", f"文件已保存至:\n{msg}")
+            else:
+                QMessageBox.warning(self, "失败", msg)
 
     def action_delete(self):
         # [修改] 获取所有选中的行
@@ -579,14 +653,14 @@ class VoiceEnrollmentApp(QMainWindow):
         if not selected_rows: 
             return
         
-        # 收集所有选中的 ID
-        ids_to_delete = []
+        # 收集所有选中的 ID 和行号（倒序处理避免索引错乱）
+        selected_data = []
         for index in selected_rows:
             row = index.row()
             v_id = self.table.item(row, 0).text()
-            ids_to_delete.append(v_id)
+            selected_data.append((row, v_id))
         
-        count = len(ids_to_delete)
+        count = len(selected_data)
         if QMessageBox.question(self, "确认", f"确定要删除选中的 {count} 个音色吗？\n此操作不可恢复！") != QMessageBox.Yes:
             return
             
@@ -598,10 +672,13 @@ class VoiceEnrollmentApp(QMainWindow):
             self.log(f"--- 开始批量删除 {count} 个音色 ---")
             success_count = 0
             
-            # [新增] 循环删除
-            for v_id in ids_to_delete:
+            # [新增] 倒序删除行（避免索引错乱）
+            for row, v_id in sorted(selected_data, key=lambda x: x[0], reverse=True):
                 try:
-                    service.delete_voice(voice_id=v_id)
+                    resp = service.delete_voice(voice_id=v_id)
+                    if hasattr(resp, 'status') and resp.status != 'OK':
+                        raise ValueError(f"删除失败，官方返回状态: {resp.status}")
+                    self.table.removeRow(row)
                     self.log(f"已删除: {v_id}")
                     success_count += 1
                 except Exception as e:
