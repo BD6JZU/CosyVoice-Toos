@@ -314,8 +314,8 @@ class VoiceEnrollmentApp(QMainWindow):
         api_layout.addWidget(self.show_api_btn)
         
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["cosyvoice-v3-plus", "cosyvoice-v3-flash", "cosyvoice-v2", "cosyvoice-v1"])
-        self.model_combo.setCurrentText("cosyvoice-v3-plus")
+        self.model_combo.addItems(["cosyvoice-v3.5-plus", "cosyvoice-v3.5-flash", "cosyvoice-v3-plus", "cosyvoice-v3-flash", "cosyvoice-v2", "cosyvoice-v1"])
+        self.model_combo.setCurrentText("cosyvoice-v3.5-plus")
         f1.addRow("API Key:", api_layout)  # 替换原有行
         f1.addRow("使用模型:", self.model_combo)
         group1.setLayout(f1)
@@ -339,13 +339,20 @@ class VoiceEnrollmentApp(QMainWindow):
         group3 = QGroupBox("3. 音色列表")
         v3 = QVBoxLayout()
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["音色ID", "状态", "模型 (猜测)"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 禁止双击编辑
+        # 修改表头标签顺序，将"模型 (猜测)"移到"状态"前面
+        self.table.setHorizontalHeaderLabels(["音色ID", "模型 (猜测)", "状态"])
+        # 设置各列的宽度策略
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)  # 音色ID拉伸
+        self.table.setColumnWidth(1, 150)  # 模型列固定宽度
+        self.table.setColumnWidth(2, 80)   # 状态列固定宽度
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 第二列根据内容调整
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 第三列根据内容调整
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.itemClicked.connect(self.action_table_click)
+        self.table.horizontalHeader().setMinimumSectionSize(80)
         
         btns = QHBoxLayout()
         self.btn_refresh = QPushButton("刷新列表")
@@ -516,20 +523,24 @@ class VoiceEnrollmentApp(QMainWindow):
             status = v_dict.get('status', 'Unknown')
             
             self.table.setItem(i, 0, QTableWidgetItem(str(v_id)))
-            
+
+            # 第1列：模型猜测
+            guess = "Unknown"
+            if "v3.5-plus" in str(v_id): guess = "cosyvoice-v3.5-plus"
+            elif "v3.5-flash" in str(v_id): guess = "cosyvoice-v3.5-flash"
+            elif "v3-plus" in str(v_id): guess = "cosyvoice-v3-plus"
+            elif "v3-flash" in str(v_id): guess = "cosyvoice-v3-flash"
+            elif "v2" in str(v_id): guess = "cosyvoice-v2"
+            elif "v1" in str(v_id): guess = "cosyvoice-v1"
+            self.table.setItem(i, 1, QTableWidgetItem(guess))
+
+            # 第2列：状态
             item_status = QTableWidgetItem(str(status))
             if status == "OK":
                 item_status.setForeground(QColor("#2ea44f"))
             else:
                 item_status.setForeground(QColor("#d73a49"))
-            self.table.setItem(i, 1, item_status)
-            
-            guess = "Unknown"
-            if "v3-plus" in str(v_id): guess = "cosyvoice-v3-plus"
-            elif "v3-flash" in str(v_id): guess = "cosyvoice-v3-flash"
-            elif "v2" in str(v_id): guess = "cosyvoice-v2"
-            elif "v1" in str(v_id): guess = "cosyvoice-v1"
-            self.table.setItem(i, 2, QTableWidgetItem(guess))
+            self.table.setItem(i, 2, item_status)
 
     def action_enroll(self):
         key = self.api_input.text().strip()
@@ -582,15 +593,17 @@ class VoiceEnrollmentApp(QMainWindow):
             
         # [修改] 获取第一行（也是唯一一行）的索引
         row = selected_rows[0].row()
-        
+
         v_id = self.table.item(row, 0).text()
-        status = self.table.item(row, 1).text()
-        
+        model_guess = self.table.item(row, 1).text()  # 现在是第1列
+
+        # 状态检查在获取状态列之后
+        status = self.table.item(row, 2).text()  # 现在是第2列
+
         if status != "OK":
             QMessageBox.warning(self, "不可用", "该音色状态不是 OK，无法使用。")
             return
-            
-        model_guess = self.table.item(row, 2).text()
+    
         if model_guess == "Unknown":
             model_guess = self.model_combo.currentText()
             

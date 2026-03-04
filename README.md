@@ -2,6 +2,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
+![Model](https://img.shields.io/badge/Model-CosyVoice%20v3.5--plus-orange)
+![Model](https://img.shields.io/badge/Model-CosyVoice%20v3.5--flash-orange)
 ![Model](https://img.shields.io/badge/Model-CosyVoice%20v3--plus-orange)
 ![Model](https://img.shields.io/badge/Model-CosyVoice%20v3--flash-orange)
 ![Model](https://img.shields.io/badge/Model-CosyVoice%20v2-orange)
@@ -26,7 +28,7 @@
 ## 🛠️ 功能模块
 ### 1. ⚙️ API 配置
 *   **动态 Key 管理**：直接在界面输入阿里云 `API Key`，无需修改源代码。
-*   **模型选择**：支持切换不同的 CosyVoice 模型版本（如 `cosyvoice-v3-plus`）。
+*   **模型选择**：支持切换不同的 CosyVoice 模型版本（如 `cosyvoice-v3.5-plus`）。
 
 ### 2. 🧬 新建音色 (声音复刻)
 *   **URL 导入**：支持输入音频文件的 URL 地址（wav/mp3）作为复刻素材。
